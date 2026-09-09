@@ -174,7 +174,8 @@ function normalizeRequest(r){
     id:r.id||'',business:r.business||'jinhap',jnfSite:r.jnfSite??r.jnf_site??'',address:r.address||'',department:r.department||'',position:r.position||'',name:r.name||'',
     ssn:r.ssn||'',ssnDisplay:r.ssnDisplay??r.ssn_display??'full',startDate:r.startDate??r.start_date??'',purpose:r.purpose||'',copies:Number(r.copies)||1,email:r.email||'',
     status:r.status||'pending',certNumber:r.certNumber??r.cert_number??'',createdAt:r.createdAt??r.created_at??'',approvedAt:r.approvedAt??r.approved_at??null,rejectedAt:r.rejectedAt??r.rejected_at??null,
-    rejectedReason:r.rejectedReason??r.rejected_reason??'',emailStatus:r.emailStatus??r.email_status??'',emailMessage:r.emailMessage??r.email_message??'',lastEmailAt:r.lastEmailAt??r.last_email_at??null
+    rejectedReason:r.rejectedReason??r.rejected_reason??'',emailStatus:r.emailStatus??r.email_status??'',emailMessage:r.emailMessage??r.email_message??'',lastEmailAt:r.lastEmailAt??r.last_email_at??null,
+    downloadExpired:r.downloadExpired??r.download_expired??false,downloadExpiresAt:r.downloadExpiresAt??r.download_expires_at??null
   };
 }
 async function submitRequest(req){
@@ -198,6 +199,26 @@ function genId(){return 'REQ-'+Date.now().toString(36).toUpperCase()+'-'+Math.ra
 function esc(v){return String(v??'').replace(/[&<>"']/g,s=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]))}
 function fmtDateKR(iso){if(!iso)return '';const d=String(iso).slice(0,10).split('-');return `${d[0]}년 ${parseInt(d[1])}월 ${parseInt(d[2])}일`}
 function fmtDateTimeKR(iso){if(!iso)return '';const d=new Date(iso);return `${d.getFullYear()}.${String(d.getMonth()+1).padStart(2,'0')}.${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`}
+const DOWNLOAD_WINDOW_MS=7*24*60*60*1000;
+function downloadExpiresAt(r){
+  if(r?.downloadExpiresAt)return r.downloadExpiresAt;
+  if(!r?.approvedAt)return null;
+  const t=new Date(r.approvedAt).getTime();
+  return Number.isFinite(t)?new Date(t+DOWNLOAD_WINDOW_MS).toISOString():null;
+}
+function isDownloadExpired(r){
+  if(r?.downloadExpired===true)return true;
+  const expires=downloadExpiresAt(r);
+  if(!expires)return false;
+  const t=new Date(expires).getTime();
+  return Number.isFinite(t)&&Date.now()>=t;
+}
+function fmtDateTimeKorean(iso){
+  if(!iso)return '';
+  const d=new Date(iso);
+  if(Number.isNaN(d.getTime()))return '';
+  return `${d.getFullYear()}년 ${d.getMonth()+1}월 ${d.getDate()}일 ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
 function normalizeSsn(v){const digits=String(v||'').replace(/\D/g,'').slice(0,13);return digits.length>6?digits.slice(0,6)+'-'+digits.slice(6):digits}
 function maskId(v){const s=normalizeSsn(v);const digits=s.replace(/\D/g,'');if(digits.length>=7)return digits.slice(0,6)+'-'+digits.slice(6,7)+'******';return s}
 function displaySsn(v,mode){return mode==='masked'?maskId(v):normalizeSsn(v)}
@@ -290,7 +311,7 @@ async function renderApply(){
 }
 
 function renderLookup(){root.classList.remove('admin-wide');if(!ONLINE_CONFIGURED){root.innerHTML=onlineSetupNotice();return}root.innerHTML=`
-  <h1 class="page-title">발급 조회 · 출력</h1><p class="page-sub">신청 시 받은 조회번호와 성명을 입력해주세요.</p>
+  <h1 class="page-title">발급 조회 · 출력</h1><p class="page-sub">신청 시 받은 조회번호와 성명을 입력해주세요. <b>승인 완료된 증명서는 승인 시점부터 7일간만 PDF 저장 및 인쇄할 수 있습니다.</b></p>
   <div class="card"><div class="lookup-form"><div class="field"><label>조회번호</label><input id="lk-id" placeholder="REQ-..."></div><div class="field"><label>성명</label><input id="lk-name" placeholder="신청 성명"></div><button class="btn btn-primary" id="lk-btn" style="height:42px">조회하기</button></div>${state.lookupError?`<div class="notice error" style="margin-top:16px">${esc(state.lookupError)}</div>`:''}</div><div id="lookup-result"></div>`;
   document.getElementById('lk-btn').onclick=async()=>{const id=document.getElementById('lk-id').value.trim(),name=document.getElementById('lk-name').value.trim();state.lookupError='';if(!id||!name){state.lookupError='조회번호와 성명을 모두 입력해주세요.';return renderLookup()}try{const found=await lookupRequest(id,name);if(!found){state.lookupError='일치하는 신청 내역이 없습니다.';state.lookupResult=null;return renderLookup()}state.lookupResult=found;renderLookup();renderLookupResult(found)}catch(err){console.error(err);state.lookupError='조회 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.';state.lookupResult=null;renderLookup()}};
   if(state.lookupResult)renderLookupResult(state.lookupResult);
@@ -298,8 +319,15 @@ function renderLookup(){root.classList.remove('admin-wide');if(!ONLINE_CONFIGURE
 async function renderLookupResult(r){const area=document.getElementById('lookup-result');if(!area)return;const settings=await loadSettings(false);const c=companyOf(settings,r.business,r.jnfSite);
   if(r.status==='pending'){area.innerHTML=`<div class="notice pending"><b>승인 대기중</b>입니다. 승인 전에는 증명서 출력 기능이 제공되지 않습니다.<br>사업자: ${esc(requestCompanyLabel(settings,r))} · 신청일: ${fmtDateTimeKR(r.createdAt)}</div>`;return}
   if(r.status==='rejected'){area.innerHTML=`<div class="notice error"><b>반려된 신청입니다.</b><br>사유: ${esc(r.rejectedReason||'담당자에게 확인해주세요.')}</div>`;return}
-  area.innerHTML=`<div class="notice success no-print"><b>승인 완료</b> · 증명번호 ${esc(r.certNumber)}<br>${r.emailStatus==='sent'?'승인 안내 메일도 발송되었습니다.':'증명서를 확인한 뒤 인쇄하거나 PDF로 저장할 수 있습니다.'}</div><div id="print-area">${certificatePagesHTML(r,settings)}</div><div class="btn-row no-print"><button class="btn btn-outline" id="pdf-btn">PDF 저장</button><button class="btn btn-accent" id="print-btn">인쇄하기</button></div>`;
-  document.getElementById('print-btn').onclick=()=>window.print();document.getElementById('pdf-btn').onclick=()=>downloadPdf(r,settings);
+  const expiresAt=downloadExpiresAt(r);
+  const expiresText=fmtDateTimeKorean(expiresAt);
+  if(isDownloadExpired(r)){
+    area.innerHTML=`<div class="notice error"><b>다운로드 가능 기간이 종료되었습니다.</b><br>재직증명서는 관리자 승인 시점부터 <b>7일간만 PDF 저장 및 인쇄</b>할 수 있습니다.${expiresText?`<br>다운로드 만료일시 : ${esc(expiresText)}`:''}<br>증명서가 다시 필요한 경우 재신청해주세요.</div>`;
+    return;
+  }
+  area.innerHTML=`<div class="notice success no-print"><b>승인 완료</b> · 증명번호 ${esc(r.certNumber)}<br><b>다운로드 가능 기간 : 승인 시점부터 7일간</b>${expiresText?` · ${esc(expiresText)}까지`:''}<br>${r.emailStatus==='sent'?'승인 안내 메일도 발송되었습니다.':'증명서를 확인한 뒤 인쇄하거나 PDF로 저장할 수 있습니다.'}</div><div id="print-area">${certificatePagesHTML(r,settings)}</div><div class="btn-row no-print"><button class="btn btn-outline" id="pdf-btn">PDF 저장</button><button class="btn btn-accent" id="print-btn">인쇄하기</button></div>`;
+  document.getElementById('print-btn').onclick=()=>{if(isDownloadExpired(r)){alert('다운로드 가능 기간이 종료되었습니다.');return}window.print()};
+  document.getElementById('pdf-btn').onclick=()=>{if(isDownloadExpired(r)){alert('다운로드 가능 기간이 종료되었습니다.');return}downloadPdf(r,settings)};
 }
 
 
@@ -397,7 +425,9 @@ async function sendApprovalEmail(r,settings){
   if(typeof emailjs==='undefined')return {status:'failed',message:'메일 모듈을 불러오지 못했습니다.'};
   try{
     const siteUrl=publicSiteUrl();
-    const message=`${r.name}님의 재직증명서 발급 신청이 승인되었습니다.\n\n증명번호 : ${r.certNumber}\n조회번호 : ${r.id}\n\n아래 사이트에서 조회번호와 성명을 입력한 뒤 재직증명서를 확인하거나 PDF로 저장해주세요.\n${siteUrl}`;
+    const expiresAt=downloadExpiresAt(r);
+    const expiresText=fmtDateTimeKorean(expiresAt);
+    const message=`${r.name}님의 재직증명서 발급 신청이 승인되었습니다.\n\n증명번호 : ${r.certNumber}\n조회번호 : ${r.id}\n\n재직증명서는 승인 시점부터 7일간만 PDF 저장 및 인쇄가 가능합니다.${expiresText?`\n다운로드 만료일시 : ${expiresText}`:''}\n\n아래 사이트에서 조회번호와 성명을 입력한 뒤 재직증명서를 확인하거나 PDF로 저장해주세요.\n${siteUrl}`;
     emailjs.init({publicKey:cfg.publicKey});
     await emailjs.send(cfg.serviceId,cfg.templateId,{
       to_email:r.email,
@@ -406,6 +436,7 @@ async function sendApprovalEmail(r,settings){
       cert_number:r.certNumber,
       approved_date:fmtDateKR((r.approvedAt||'').slice(0,10)),
       request_id:r.id,
+      download_expires_at:expiresText,
       site_url:siteUrl,
       message
     });
@@ -444,7 +475,7 @@ async function approveRequest(id,settings,btn){
 }
 async function rejectRequest(id){const reason=prompt('반려 사유를 입력해주세요.');if(reason===null)return;try{const {error}=await ONLINE_DB.rpc('reject_certificate_request',{p_id:id,p_reason:reason.trim()||'담당자 확인 필요'});if(error)throw error;state.requestsCache=await loadRequests();renderAdminDashboard()}catch(err){console.error(err);alert('반려 처리 중 오류가 발생했습니다.')}}
 async function deleteRequest(id){if(!confirm('이 신청 기록을 삭제하시겠습니까?'))return;try{const {error}=await ONLINE_DB.from('certificate_requests').delete().eq('id',id);if(error)throw error;state.requestsCache=await loadRequests();renderAdminDashboard()}catch(err){console.error(err);alert('삭제하지 못했습니다.')}}
-async function resendEmail(id,settings,btn){const r=state.requestsCache.find(x=>x.id===id);if(!r||r.status!=='approved')return;if(!confirm('승인 안내 메일과 PDF를 다시 발송하시겠습니까?'))return;btn.disabled=true;btn.textContent='발송 중...';try{const mail=await sendApprovalEmail(r,settings);await updateRequestMailStatus(id,mail);state.requestsCache=await loadRequests();renderAdminDashboard();alert(mail.status==='sent'?'메일을 발송했습니다.':`메일 발송에 실패했습니다.\n${mail.message}`)}catch(err){console.error(err);alert('메일 처리 중 오류가 발생했습니다.')}}
+async function resendEmail(id,settings,btn){const r=state.requestsCache.find(x=>x.id===id);if(!r||r.status!=='approved')return;if(!confirm('승인 안내 메일을 다시 발송하시겠습니까?'))return;btn.disabled=true;btn.textContent='발송 중...';try{const mail=await sendApprovalEmail(r,settings);await updateRequestMailStatus(id,mail);state.requestsCache=await loadRequests();renderAdminDashboard();alert(mail.status==='sent'?'메일을 발송했습니다.':`메일 발송에 실패했습니다.\n${mail.message}`)}catch(err){console.error(err);alert('메일 처리 중 오류가 발생했습니다.')}}
 async function showRequest(id,settings){const r=state.requestsCache.find(x=>x.id===id)||(await loadRequests()).find(x=>x.id===id);if(!r)return;const c=companyOf(settings,r.business,r.jnfSite),extra=document.getElementById('admin-extra');extra.innerHTML=`<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><b>신청 상세</b><button class="btn btn-ghost btn-sm" id="close-extra">닫기</button></div><div class="form-grid"><div><span class="hint">사업자</span><div>${esc(requestCompanyLabel(settings,r))}</div></div><div><span class="hint">조회번호</span><div style="font-family:monospace;font-weight:700">${esc(r.id)}</div></div><div><span class="hint">성명</span><div>${esc(r.name)}</div></div><div><span class="hint">소속 / 직위</span><div>${esc(r.department)} / ${esc(r.position)}</div></div><div><span class="hint">주민등록번호</span><div>${esc(maskId(r.ssn))}</div></div><div><span class="hint">입사일</span><div>${fmtDateKR(r.startDate)}</div></div><div><span class="hint">용도 / 매수</span><div>${esc(r.purpose)} / ${r.copies}</div></div><div class="field full"><span class="hint">주소</span><div>${esc(r.address)}</div></div><div class="field full"><span class="hint">안내 메일</span><div>${esc(r.email)}</div></div></div>${r.status==='approved'?`<div style="margin-top:20px">${certificateHTML(r,settings,1,1)}</div>`:''}</div>`;document.getElementById('close-extra').onclick=()=>extra.innerHTML='';extra.scrollIntoView({behavior:'smooth'})}
 function exportCSV(list,settings){const rows=[['상태','사업자','JNF 사업장','조회번호','성명','소속','직위','입사일','용도','매수','안내 메일','증명번호','신청일시','승인일시']];list.forEach(r=>{const c=companyOf(settings,r.business,r.jnfSite);rows.push([statusLabel(r.status),c.label,r.business==='jnf'?c.siteLabel:'',r.id,r.name,r.department,r.position,r.startDate,r.purpose,r.copies,r.email,r.certNumber||'',r.createdAt,r.approvedAt||''])});const csv='\ufeff'+rows.map(row=>row.map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(',')).join('\r\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`재직증명서_발급기록_${todayISO()}.csv`;a.click();URL.revokeObjectURL(a.href)}
 
